@@ -1,0 +1,97 @@
+REQUIREMENTS FOR THIS SCRIPT (Guard)
+=========================================
+
+1. PYTHON VERSION
+   Python 3.8 or higher recommended
+   (watchdog and argparse features used here work from 3.8+;
+   f-strings and pathlib-style usage assume Python 3 generally)
+
+2. PYTHON PACKAGES
+   External (must be installed via pip):
+     watchdog        -> pip install watchdog
+   Built-in / standard library (no install needed):
+     sqlite3
+     argparse
+     os
+     sys
+     time
+     datetime
+
+3. OPERATING SYSTEM
+   Cross-platform (Windows, macOS, Linux) — watchdog abstracts
+   the OS-level file system event API for each platform:
+     Windows -> ReadDirectoryChangesW (via winapi)
+     macOS   -> FSEvents
+     Linux   -> inotify
+   No code changes needed to switch OS, but behavior/latency of
+   events can differ slightly per platform (see note in section 9)
+
+4. SYSTEM TOOLS / PATH REQUIREMENTS
+   None. Everything runs through the watchdog Python library and
+   Python's built-in sqlite3 module — no external command-line
+   tools required in PATH.
+
+5. INTERNET CONNECTION
+   Not required. This tool only watches a local directory and
+   writes to a local SQLite database. Fully offline-capable.
+
+6. PERMISSIONS
+   Standard user permissions are enough IF the user has read
+   access to the watched directory and write access to the
+   folder where the .db file is created.
+   Watching system-protected directories (e.g. C:\Windows,
+   /etc) may require elevated/Administrator privileges.
+
+7. DATABASE REQUIREMENTS
+   SQLite database file is created automatically on first run
+   if it doesn't exist (via init_db()) — no manual setup needed.
+   Default location: guard.db in the script's working directory
+   (overridable via --db argument).
+   No separate database server needed (SQLite is serverless,
+   file-based).
+
+8. COMMAND-LINE ARGUMENTS
+   Required:
+     directory     -> path to the folder to monitor
+   Optional:
+     --db          -> path to SQLite db file (default: guard.db)
+     --recursive   -> whether to watch subdirectories (default: True)
+   Script exits with an error message if the given directory
+   argument does not exist or is not a valid directory
+   (checked via os.path.isdir before starting the observer).
+
+9. PLATFORM-SPECIFIC BEHAVIOR NOTES
+   - On Windows, watched paths must exist at start time; the
+     underlying WinAPI call fails immediately with
+     FileNotFoundError (WinError 3) if the path is invalid —
+     this is why directory validation happens before observer.start()
+   - Event granularity differs slightly per OS: Windows/Linux
+     tend to fire more granular events (e.g. multiple "modified"
+     events per save) than macOS FSEvents, which can coalesce
+     rapid changes — no debouncing is implemented by default,
+     so duplicate/rapid entries in the DB are expected on save-heavy
+     editors (see optional "Debouncing" note below)
+
+10. USER INPUT VALIDATION NOTES
+    Directory argument IS validated (must exist, must be a directory)
+    before the observer starts.
+    No validation is performed on file paths reported by watchdog
+    events themselves (e.g. no check for symlink loops, permission
+    errors mid-watch, or extremely long paths — these would surface
+    as runtime exceptions if they occur).
+
+11. RUNTIME NOTE
+    Script is guarded with `if __name__ == "__main__":` — safe to
+    import without triggering the watch loop.
+    Runs indefinitely once started (blocking loop with time.sleep(1))
+    until interrupted via Ctrl+C (KeyboardInterrupt), at which point
+    the observer stops cleanly and the DB connection is closed.
+
+12. NOT YET IMPLEMENTED (optional future additions)
+    - Event debouncing/coalescing for rapid successive changes
+    - Content hashing to distinguish real content changes vs.
+      metadata-only touches
+    - Running as a background service/daemon (systemd, Windows
+      Service, launchd) — currently must be run in an active
+      terminal session
+    - Config file support (currently CLI-args only)
