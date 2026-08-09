@@ -1,14 +1,14 @@
 import sqlite3
 import time
+import argparse
 from datetime import datetime, timezone
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 DB_PATH = "guard.db"
-WATCH_DIR = "/path/to/monitor"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS changes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +46,12 @@ class GuardHandler(FileSystemEventHandler):
         self._log(f"moved -> {event.dest_path}", event.src_path)
 
 def main():
+    parser = argparse.ArgumentParser(description="Guard: monitor a directory for file changes.")
+    parser.add_argument("directory", help="Path to the directory you want to monitor")
+    args = parser.parse_args()
+
+    WATCH_DIR = args.directory
+
     conn = init_db()
     handler = GuardHandler(conn)
     observer = Observer()
