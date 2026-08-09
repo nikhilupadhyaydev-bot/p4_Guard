@@ -46,6 +46,7 @@ class GuardHandler(FileSystemEventHandler):
         self._log(f"moved -> {event.dest_path}", event.src_path)
 
 def main():
+    print("Run the .py file using 'python main.py Directory Location'")
     parser = argparse.ArgumentParser(description="Guard: monitor a directory for file changes.")
     parser.add_argument("directory", help="Path to the directory you want to monitor")
     args = parser.parse_args()
