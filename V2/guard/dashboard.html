@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<!--
+  Guard's live dashboard.
+
+  One file, no build step, no framework. It polls two JSON endpoints that
+  guard.py serves:
+
+      GET /api/events?since=<id>   everything newer than an event id
+      GET /api/summary             counts, uptime, busiest paths
+
+  Polling with a cursor rather than a streaming connection keeps this simple:
+  whatever id the page is holding stays valid if you close the laptop lid, so
+  there is no reconnect logic anywhere in here.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guard</title>
+<style>
+  /* ── design tokens ───────────────────────────────────────────────────── */
+  :root {
+    --base:    #12100D;   /* warm near-black, like paper in a dark room */
+    --panel:   #1A1714;
+    --raised:  #221E19;
+    --rule:    #2A2520;
+    --text:    #E8E2D8;
+    --muted:   #8E857A;
+    --faint:   #5B544B;
+
+    /* Severity is the whole colour system here — it is the information,
+       not decoration, so nothing else in the page competes with it. */
+    --info:     #6E8BA0;
+    --notice:   #4FA97E;
+    --warning:  #D9903F;
+    --critical: #D9534F;
+
+    --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono",
+            Consolas, "DejaVu Sans Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--base);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ── top bar ─────────────────────────────────────────────────────────── */
+  header {
+    display: flex; align-items: baseline; gap: 18px;
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel);
+    flex-wrap: wrap;
+  }
+  .wordmark { font-family: var(--sans); font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .watching { color: var(--muted); flex: 1; min-width: 200px; word-break: break-all; }
+  .watching b { color: var(--text); font-weight: 400; }
+  .state { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+  .pulse {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--notice);
+    box-shadow: 0 0 0 0 rgba(79,169,126,.6);
+    animation: breathe 2.4s ease-out infinite;
+  }
+  /* The one piece of unprompted motion in the page: it answers "is this
+     thing still alive", which a static dot cannot. */
+  @keyframes breathe {
+    0%   { box-shadow: 0 0 0 0 rgba(79,169,126,.5); }
+    70%  { box-shadow: 0 0 0 7px rgba(79,169,126,0); }
+    100% { box-shadow: 0 0 0 0 rgba(79,169,126,0); }
+  }
+
+  /* ── severity strip, doubles as the filter ───────────────────────────── */
+  .levels { display: flex; border-bottom: 1px solid var(--rule); background: var(--panel); }
+  .level {
+    flex: 1; padding: 11px 18px; cursor: pointer;
+    border: none; border-top: 2px solid transparent; border-right: 1px solid var(--rule);
+    background: transparent; color: var(--muted);
+    font-family: var(--mono); font-size: 13px; text-align: left;
+  }
+  .level:last-child { border-right: none; }
+  .level:hover { background: var(--raised); }
+  .level[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+  .level .n { display: block; font-size: 22px; font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+  .level .k { font-family: var(--sans); font-size: 11px; }
+  .level[data-level="info"][aria-pressed="true"]     { border-top-color: var(--info); }
+  .level[data-level="notice"][aria-pressed="true"]   { border-top-color: var(--notice); }
+  .level[data-level="warning"][aria-pressed="true"]  { border-top-color: var(--warning); }
+  .level[data-level="critical"][aria-pressed="true"] { border-top-color: var(--critical); }
+  .level[data-level="critical"] .n { color: var(--critical); }
+  .level[data-level="warning"]  .n { color: var(--warning); }
+
+  /* ── alert banner ────────────────────────────────────────────────────── */
+  .alarm {
+    display: none; gap: 12px; align-items: baseline;
+    padding: 13px 22px;
+    background: rgba(217,83,79,.13);
+    border-bottom: 1px solid var(--critical);
+    color: #FFD7D5;
+  }
+  .alarm.on { display: flex; }
+  .alarm b { font-family: var(--sans); color: var(--critical); }
+  .alarm button {
+    margin-left: auto; background: none; border: 1px solid var(--critical);
+    color: var(--critical); padding: 3px 11px; cursor: pointer; font-family: var(--mono); font-size: 12px;
+  }
+
+  /* ── two-column body ─────────────────────────────────────────────────── */
+  main { display: grid; grid-template-columns: 1fr 260px; gap: 1px; background: var(--rule); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+
+  .ledger, aside { background: var(--base); }
+
+  .ledger-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 22px; border-bottom: 1px solid var(--rule); color: var(--muted);
+  }
+  .ledger-head .title { font-family: var(--sans); color: var(--text); }
+  .ledger-head button {
+    margin-left: auto; background: var(--raised); border: 1px solid var(--rule);
+    color: var(--muted); padding: 4px 12px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .ledger-head button:hover { color: var(--text); }
+
+  #rows { height: calc(100vh - 230px); overflow-y: auto; }
+  @media (max-width: 860px) { #rows { height: 60vh; } }
+
+  /* Each row carries a coloured gutter. The gutter is the severity — it
+     means the rows are scannable without reading a single word. */
+  .row {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px;
+    padding: 6px 22px 6px 19px;
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid rgba(42,37,32,.55);
+  }
+  .row[data-level="info"]     { border-left-color: var(--info); }
+  .row[data-level="notice"]   { border-left-color: var(--notice); }
+  .row[data-level="warning"]  { border-left-color: var(--warning); }
+  .row[data-level="critical"] { border-left-color: var(--critical); background: rgba(217,83,79,.07); }
+  .row:hover { background: var(--panel); }
+
+  /* Brief highlight so your eye catches what just arrived, then it settles
+     into the record like everything else. */
+  .row.fresh { animation: land 1.6s ease-out; }
+  @keyframes land {
+    from { background: rgba(232,226,216,.09); }
+    to   { background: transparent; }
+  }
+
+  .clock  { color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+  .action { color: var(--muted); width: 88px; flex: none; }
+  .row[data-level="warning"]  .action { color: var(--warning); }
+  .row[data-level="critical"] .action { color: var(--critical); }
+  .path   { flex: 1; min-width: 0; word-break: break-all; }
+  .meta   { color: var(--faint); flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+  .why {
+    flex-basis: 100%; padding-left: 102px; color: var(--muted); font-size: 12px;
+  }
+  .row[data-level="critical"] .why { color: #E8908D; }
+  /* Folder-wide alerts are not about one file, so they get the full width. */
+  .row[data-action="alert"] { background: rgba(217,83,79,.14); }
+  .row[data-action="alert"] .path { color: #FFD7D5; word-break: normal; }
+
+  .empty { padding: 60px 22px; text-align: center; color: var(--faint); }
+
+  /* ── sidebar ─────────────────────────────────────────────────────────── */
+  aside { padding: 18px 20px; }
+  aside section { margin-bottom: 26px; }
+  aside h2 {
+    font-family: var(--sans); font-size: 11px; font-weight: 500;
+    color: var(--muted); margin: 0 0 9px;
+  }
+  .big { font-size: 24px; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--faint); font-size: 12px; }
+  .bar { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+  .bar span:last-child { color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+  .bar span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  ::-webkit-scrollbar { width: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+
+<body>
+
+<header>
+  <span class="wordmark">Guard</span>
+  <span class="watching">watching <b id="root">…</b></span>
+  <span class="state"><span class="pulse"></span><span id="uptime">starting</span></span>
+</header>
+
+<div class="alarm" id="alarm">
+  <b>Alert</b>
+  <span id="alarm-text"></span>
+  <button onclick="dismissAlarm()">Dismiss</button>
+</div>
+
+<div class="levels" id="levels">
+  <button class="level" data-level="critical" aria-pressed="false"><span class="n" id="n-critical">0</span><span class="k">critical</span></button>
+  <button class="level" data-level="warning"  aria-pressed="false"><span class="n" id="n-warning">0</span><span class="k">warning</span></button>
+  <button class="level" data-level="notice"   aria-pressed="false"><span class="n" id="n-notice">0</span><span class="k">notice</span></button>
+  <button class="level" data-level="info"     aria-pressed="false"><span class="n" id="n-info">0</span><span class="k">info</span></button>
+</div>
+
+<main>
+  <div class="ledger">
+    <div class="ledger-head">
+      <span class="title">Change log</span>
+      <span id="filter-note"></span>
+      <button id="follow" onclick="toggleFollow()">Following</button>
+    </div>
+    <div id="rows"><div class="empty">Waiting for the first change. Try editing a file in the watched folder.</div></div>
+  </div>
+
+  <aside>
+    <section>
+      <h2>Files tracked</h2>
+      <div class="big" id="tracked">—</div>
+      <div class="sub" id="baseline">no baseline</div>
+    </section>
+    <section>
+      <h2>Events recorded</h2>
+      <div class="big" id="total">—</div>
+      <div class="sub">since the log was created</div>
+    </section>
+    <section>
+      <h2>Busiest paths, last 24h</h2>
+      <div id="busiest"><div class="sub">nothing yet</div></div>
+    </section>
+  </aside>
+</main>
+
+<script>
+// ── state ──────────────────────────────────────────────────────────────────
+let cursor = 0;          // highest event id this page has drawn
+let following = true;    // auto-scroll to the newest row
+let filter = null;       // severity to show, or null for everything
+let rootPath = '';       // watched folder, so paths can be shown relative to it
+let alarmLocked = false; // a burst alert holds the banner until it is dismissed
+const MAX_ROWS = 500;    // the log is unbounded; the DOM should not be
+
+const rowsEl = document.getElementById('rows');
+
+// ── drawing one event ──────────────────────────────────────────────────────
+function shortHash(h) { return h ? h.slice(0, 12) : ''; }
+
+// The log stores absolute paths, which is what an audit trail should do.
+// Screens are narrow, so strip the watched root off for display.
+function relative(path) {
+  if (rootPath && path.startsWith(rootPath)) {
+    return path.slice(rootPath.length).replace(/^[\\/]/, '') || '.';
+  }
+  return path;
+}
+
+function sizeNote(event) {
+  const before = event.size_before, after = event.size_after;
+  if (before == null || after == null || before === after) return shortHash(event.new_hash);
+  const delta = after - before;
+  const sign = delta > 0 ? '+' : '−';
+  return sign + humanSize(Math.abs(delta));
+}
+
+function humanSize(n) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+}
+
+function addRow(event, fresh) {
+  if (rowsEl.firstElementChild?.className === 'empty') rowsEl.innerHTML = '';
+
+  const row = document.createElement('div');
+  row.className = 'row' + (fresh ? ' fresh' : '');
+  row.dataset.level = event.severity;
+  row.dataset.path = event.path;
+  row.dataset.action = event.action;
+  if (filter && filter !== event.severity) row.style.display = 'none';
+
+  const clock = event.ts.slice(11, 19);
+  const path = event.detail && event.action === 'moved'
+    ? `${relative(event.path)} → ${relative(event.detail)}`
+    : relative(event.path);
+
+  // Only warnings and alerts get their reason spelled out. Explaining every
+  // routine edit would bury the ones that matter.
+  const loud = event.severity === 'warning' || event.severity === 'critical';
+
+  // A burst alert is about the whole folder, not one file, so its message is
+  // the row rather than a footnote under a path that means nothing.
+  const isAlert = event.action === 'alert';
+
+  row.innerHTML = `
+    <span class="clock">${clock}</span>
+    <span class="action">${event.action}</span>
+    <span class="path"></span>
+    <span class="meta">${isAlert ? '' : sizeNote(event)}</span>
+    ${loud && !isAlert ? '<span class="why"></span>' : ''}`;
+
+  // textContent, not innerHTML: a filename is untrusted input and could
+  // contain angle brackets.
+  row.querySelector('.path').textContent = isAlert ? event.reason : path;
+  if (loud && !isAlert) row.querySelector('.why').textContent = event.reason;
+
+  rowsEl.appendChild(row);
+  while (rowsEl.children.length > MAX_ROWS) rowsEl.firstElementChild.remove();
+
+  if (event.severity === 'critical' && fresh) raiseAlarm(event.reason, isAlert);
+  if (following) rowsEl.scrollTop = rowsEl.scrollHeight;
+}
+
+function raiseAlarm(text, isAlert) {
+  // A folder-wide alert outranks any single file's warning. Without this the
+  // ransomware message is replaced a second later by the next routine
+  // critical, which is precisely the wrong way round.
+  if (alarmLocked && !isAlert) return;
+  if (isAlert) alarmLocked = true;
+  document.getElementById('alarm-text').textContent = text;
+  document.getElementById('alarm').classList.add('on');
+}
+
+function dismissAlarm() {
+  alarmLocked = false;
+  document.getElementById('alarm').classList.remove('on');
+}
+
+// ── controls ───────────────────────────────────────────────────────────────
+function toggleFollow() {
+  following = !following;
+  document.getElementById('follow').textContent = following ? 'Following' : 'Paused';
+  if (following) rowsEl.scrollTop = rowsEl.scrollHeight;
+}
+
+// Scrolling up by hand means you want to read something, so stop yanking the
+// view away from you.
+rowsEl.addEventListener('scroll', () => {
+  const atBottom = rowsEl.scrollHeight - rowsEl.scrollTop - rowsEl.clientHeight < 40;
+  if (!atBottom && following) toggleFollow();
+});
+
+document.getElementById('levels').addEventListener('click', (e) => {
+  const button = e.target.closest('.level');
+  if (!button) return;
+
+  filter = filter === button.dataset.level ? null : button.dataset.level;
+  for (const other of document.querySelectorAll('.level')) {
+    other.setAttribute('aria-pressed', String(other.dataset.level === filter));
+  }
+  document.getElementById('filter-note').textContent =
+    filter ? `showing ${filter} only` : '';
+  for (const row of rowsEl.querySelectorAll('.row')) {
+    row.style.display = (!filter || row.dataset.level === filter) ? '' : 'none';
+  }
+});
+
+// ── polling ────────────────────────────────────────────────────────────────
+function uptimeText(seconds) {
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+  if (h) return `watching ${h}h ${String(m).padStart(2, '0')}m`;
+  if (m) return `watching ${m}m ${String(s).padStart(2, '0')}s`;
+  return `watching ${s}s`;
+}
+
+async function refreshSummary() {
+  const summary = await (await fetch('/api/summary')).json();
+  rootPath = summary.root;
+  document.getElementById('root').textContent = summary.root;
+  document.getElementById('uptime').textContent = uptimeText(summary.uptime);
+  document.getElementById('tracked').textContent = summary.tracked.toLocaleString();
+  document.getElementById('total').textContent = summary.total_events.toLocaleString();
+  document.getElementById('baseline').textContent =
+    summary.baseline ? 'baseline ' + summary.baseline.slice(0, 10) : 'no baseline';
+
+  for (const [level, count] of Object.entries(summary.severity)) {
+    const el = document.getElementById('n-' + level);
+    if (el) el.textContent = count.toLocaleString();
+  }
+
+  const busiest = document.getElementById('busiest');
+  busiest.innerHTML = summary.busiest.length
+    ? summary.busiest.map(entry => {
+        const line = document.createElement('div');
+        line.className = 'bar';
+        const name = document.createElement('span');
+        name.textContent = relative(entry.path);
+        name.title = entry.path;
+        const n = document.createElement('span');
+        n.textContent = entry.count;
+        line.append(name, n);
+        return line.outerHTML;
+      }).join('')
+    : '<div class="sub">nothing yet</div>';
+
+  return summary;
+}
+
+async function poll(firstRun = false) {
+  try {
+    const events = (await (await fetch(`/api/events?since=${cursor}`)).json()).events;
+    for (const event of events) {
+      cursor = event.id;
+      addRow(event, !firstRun);
+    }
+    await refreshSummary();
+  } catch {
+    // Guard has stopped, or the page outlived it. Keep trying quietly.
+    document.getElementById('uptime').textContent = 'not responding';
+  }
+}
+
+// Start near the end of the log rather than replaying it from event one.
+(async function start() {
+  const summary = await refreshSummary().catch(() => null);
+  if (summary) cursor = Math.max(0, summary.latest_id - 200);
+  await poll(true);
+  setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>

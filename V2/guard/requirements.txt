@@ -1,0 +1,3 @@
+# The only runtime dependency. Everything else Guard uses — SQLite, hashing,
+# the HTTP server, the CLI — is in the Python standard library.
+watchdog>=3.0

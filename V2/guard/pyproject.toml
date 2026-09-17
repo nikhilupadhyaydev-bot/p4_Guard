@@ -1,0 +1,26 @@
+[project]
+name = "guard"
+version = "2.0.0"
+description = "File integrity monitoring for a directory tree"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["file-integrity", "monitoring", "security", "fim", "ransomware", "audit"]
+dependencies = ["watchdog>=3.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+guard = "guard:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]

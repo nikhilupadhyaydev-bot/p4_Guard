@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Guard's own logs
+guard.db
+guard.db-wal
+guard.db-shm
+*.guard.db
+
+.DS_Store
+.idea/
+.vscode/
